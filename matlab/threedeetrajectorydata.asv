@@ -1,0 +1,27 @@
+file_path = 'C:\Users\munib\Documents\PandasForGVS\NOV29PILOT\AS_CONTDATA_PILOT_NOV_29_2023_OCULUS_CLEAN.csv';
+data_table = readtable(file_path, 'Delimiter', ',');
+
+% Assuming data_table is already loaded
+
+% Find indices where 'TF' column is 'True'
+trueIndices = find(strcmp(data_table.TF, 'True'));
+
+% Initialize the new dataset
+newDataset = table();
+
+% Iterate through the 'True' indices
+for i = 1:length(trueIndices)
+    % Add rows with 'True' value to the new dataset
+    newDataset = [newDataset; data_table(trueIndices(i), :)];
+
+    % Check if the next row is 'False' or if it's the last row
+    if i < length(trueIndices) && strcmp(data_table.TF(trueIndices(i + 1)), 'False')
+        % Demarcate the row as 'newReach'
+        newRow = data_table(trueIndices(i + 1), :);
+        newRow.newReach = true;
+        newDataset = [newDataset; newRow];
+    end
+end
+
+% Display the new dataset
+disp(newDataset);

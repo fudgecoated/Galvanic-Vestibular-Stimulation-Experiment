@@ -1,0 +1,82 @@
+clear
+close all
+clc
+
+directoryPath = 'C:\Users\munib\Documents\PandasForGVS\NOV29PILOT';
+cd(directoryPath);
+sample_rate=960; % [Hz of Treadmill]
+load("AS_COP_NOV29-2023_01.mat", 'realtime', 'samples', 'samplesHandrail', 'time'); %load original raw force plate data
+filename = 'treadmillRawData.mat';
+save(filename,'realtime', 'samples', 'samplesHandrail', 'time');
+
+[forcesAndMoments] = loadForcesFromHBCLBertecTreadmillMatFile('treadmillRawData.mat','forceFrequency',[sample_rate],'shouldFilter',[1],'filterCutoffFrequency',[30]);
+groundReactionMoments=forcesAndMoments.left.groundReactionMoments; % [Nm], measured at 1000 Hz, maybe ??
+groundReactionForces=forcesAndMoments.left.groundReactionForces; % [N], measured at 1000 Hz, maybe ??
+t=(0:length(groundReactionForces)-1)/sample_rate;
+idx_cut=t>90 | t<5; % indexing every sample after t=500 and before t=60
+t(idx_cut)=[];
+t=t-t(1); % to make sure time axis starts at 0
+groundReactionForces(idx_cut,:)=[]; % trow away everything after 525 seconds
+groundReactionMoments(idx_cut,:)=[]; % trow away everything after 525 seconds
+% cop position wrt back left side of treadmill. positive x-direction in the
+% walking direction. positive y-direction towards middle
+ry=groundReactionMoments(:,1)./groundReactionForces(:,3); % [m]
+rx=-groundReactionMoments(:,2)./groundReactionForces(:,3); % [m]
+
+ryd=diff(ry)*sample_rate; % [m/s] velocity of cop in y direction. delta y / delta time (1/sf)
+rxd=diff(rx)*sample_rate;
+v_r=sqrt(ryd.^2+rxd.^2); %computes the magnitude of the velocity coordinates (pythagoras)
+
+figure;plot(rx,ry)
+xticks("auto")
+title('y coordinate over time')
+xlabel('COPx (m)')
+ylabel('COPy (m)')
+
+%find peaks in v_cop
+figure;
+[~,LOCS] = findpeaks(rxd,'MinPeakDistance',58*sample_rate,'MinPeakHeight',0.1, 'NPeaks',6);
+findpeaks(rxd,sample_rate,'MinPeakDistance',58,'MinPeakHeight',0.1,'NPeaks',6)
+xticks([0 30 60 90])
+xlabel('Time (s)')
+ylabel('COP velocity (m/s)')
+        
+for iPeak=1:length(LOCS) % we are gonna do something for every peak
+    figure
+    %axis equal; hold on
+    axis([-0.42 -0.46]); hold on %this will ensure axis are in similar proportions. NEED TO ALTER THE LIMITS BASED ON TRIAL
+    xlabel('left-right sway [m]')
+    ylabel('front-back sway [m]')
+    time_span=5*sample_rate; % nr of samples to look at round peak
+    idx_tmp=LOCS(iPeak)-time_span:LOCS(iPeak)+time_span;
+    comet(rx(idx_tmp),ry(idx_tmp),0.2);
+    %comet3(rx(idx_tmp),ry(idx_tmp),t(idx_tmp)); %add temporality
+end
+
+
+
+
+
+
+% %%%%
+% t=(0:length(samples)-1)/sample_rate;
+% idx_cut=t>90 | t<30; % indexing every sample after t=500 and before t=60
+% t(idx_cut)=[];
+% t=t-t(1);
+% filteredForcesAndMoments = forcesAndMoments(idx_cut,:);
+% groundReactionMoments=filteredForcesAndMoments.left.groundReactionMoments; % [Nm], measured at 960hz
+% groundReactionForces=filteredForcesAndMoments.left.groundReactionForces; % [Nm], measured at 960hz
+% 
+% 
+% idx_cut=elapsedtime>90 | elapsedtime<30; % specify the time constraints of the useable data (ie. this cuts out data below and above the specified times [in seconds])
+% filteredForcesAndMoments = forcesAndMoments(~idx_cut,:);     % specifies a new forceAndMoments Dataset with added time constraints from above line
+% 
+% 
+% combinedSampleTime = [samples, time]     %adds elapsed time [seconds] to the 21st column in addition to forceplate data
+% elapsedtime = combinedSampleTime(:,21)   %time [seconds], colon specifies all rows
+% 
+% %%%%
+
+
+
+

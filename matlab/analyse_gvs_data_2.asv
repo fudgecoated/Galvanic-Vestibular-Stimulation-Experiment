@@ -1,0 +1,88 @@
+function analyzeCOPData()
+    % Analyze Center of Pressure (COP) data from motion capture files
+    
+    % Configuration
+    sample_rate = 960;  % Sampling frequency [Hz]
+    range = 0.07;       % [m]
+    
+    % Get MAT files in current directory
+    mat_files = dir('*.mat');
+    
+    % Initialize result storage
+    all_xvar_idx = [];
+    all_yvar_idx = [];
+    
+    % Process each MAT file
+    for i = 1:length(mat_files)
+        fileName = mat_files(i).name;
+        
+        % Process only specific files or all MAT files as needed
+        if strcmp(fileName, 'MA_PILOT_JAN2625_01.mat')
+            % Load forces data
+            try
+                [forcesAndMoments] = loadForcesFromHBCLBertecTreadmillMatFile(fileName, ...
+                    'forceFrequency', sample_rate, ...
+                    'shouldFilter', 1, ...
+                    'filterCutoffFrequency', 30);
+                
+                % Extract ground reaction data
+                groundReactionMoments = forcesAndMoments.left.groundReactionMoments;
+                groundReactionForces = forcesAndMoments.left.groundReactionForces;
+                
+                % Time vector
+                t = (0:length(groundReactionForces)-1)/sample_rate;
+                
+                % Cut initial 3 seconds
+                idx_cut = t < 3;
+                t(idx_cut) = [];
+                t = t - t(1);
+                groundReactionForces(idx_cut,:) = [];
+                groundReactionMoments(idx_cut,:) = [];
+                
+                % Calculate COP velocities
+                ry = groundReactionMoments(:,1) ./ groundReactionForces(:,3);
+                rx = -groundReactionMoments(:,2) ./ groundReactionForces(:,3);
+                
+                % Find peaks
+                [~, LOCS] = findpeaks(rx, 'MinPeakDistance', 3*sample_rate, 'MinPeakHeight', 0.44);
+                
+                % Analyze peaks
+                xvar_idx = zeros(length(LOCS), 1);
+                yvar_idx = zeros(length(LOCS), 1);
+                
+                for iPeak2 = 1:length(LOCS)
+                    tmp_reach = 1 * sample_rate;
+                    idx_reach = max(1, LOCS(iPeak2)-tmp_reach) : min(length(rx), LOCS(iPeak2)+tmp_reach);
+                    
+                    xvar_idx(iPeak2) = var(rx(idx_reach));
+                    yvar_idx(iPeak2) = var(ry(idx_reach));
+                end
+                
+                % Plotting
+                figure;
+                findpeaks(ry, sample_rate, 'MinPeakDistance', 3, 'MinPeakHeight', 0.44);
+                title('COP Velocity Peaks');
+                xlabel('Time [s]');
+                ylabel('COP velocity [m/s]');
+                
+                % Store results
+                all_xvar_idx = [all_xvar_idx; xvar_idx];
+                all_yvar_idx = [all_yvar_idx; yvar_idx];
+            catch ME
+                fprintf('Error processing file %s: %s\n', fileName, ME.message);
+            end
+        end
+    end
+    
+    % Plot variance comparison
+    if ~isempty(all_xvar_idx)
+        figure;
+        plot(all_xvar_idx, 'k-o');
+        hold on;
+        plot(all_yvar_idx, 'r-x');
+        title('Variance in COP Directions');
+        xlabel('Measurement Index');
+        ylabel('Variance');
+        legend('X Variance', 'Y Variance');
+    end
+end

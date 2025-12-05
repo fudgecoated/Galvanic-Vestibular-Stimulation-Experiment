@@ -1,0 +1,134 @@
+% Script to analyze Center of Pressure (COP) data from force plate measurements
+% Specifically for GVS trials analysis
+
+% Parameters
+sample_rate = 960; % Hz (based on context from the code)
+time_window = [30, 90]; % seconds to analyze
+peak_detection_params = struct(...
+    'MinPeakDistance', 58, ... % seconds
+    'MinPeakHeight', 0.1, ...
+    'NPeaks', 6 ...
+);
+
+% Load and process data
+fileName = 'MA_PILOT_JAN2625_01.mat';
+[forcesAndMoments] = loadForcesFromHBCLBertecTreadmillMatFile(fileName, ...
+    'forceFrequency', sample_rate, ...
+    'shouldFilter', 1, ...
+    'filterCutoffFrequency', 30);
+
+% Extract forces and moments
+groundReactionMoments = forcesAndMoments.left.groundReactionMoments; % [Nm]
+groundReactionForces = forcesAndMoments.left.groundReactionForces;   % [N]
+
+% Create time vector and trim data
+t = (0:length(groundReactionForces)-1)/sample_rate;
+idx_cut = t > time_window(2) | t < time_window(1);
+t(idx_cut) = [];
+t = t - t(1); % Start time at 0
+
+% Trim forces and moments
+groundReactionForces(idx_cut,:) = [];
+groundReactionMoments(idx_cut,:) = [];
+
+% Calculate COP positions
+% COP position relative to back left side of treadmill
+% positive x: walking direction, positive y: towards middle
+ry = groundReactionMoments(:,1)./groundReactionForces(:,3); % [m]
+rx = -groundReactionMoments(:,2)./groundReactionForces(:,3); % [m]
+
+% Calculate COP velocity
+ryd = diff(ry)*sample_rate; % [m/s]
+rxd = diff(rx)*sample_rate;
+v_r = sqrt(ryd.^2 + rxd.^2);
+
+% Find peaks in COP velocity
+figure('Name', 'COP Velocity Peaks');
+[~, LOCS] = findpeaks(v_r, 'MinPeakDistance', peak_detection_params.MinPeakDistance*sample_rate, ...
+    'MinPeakHeight', peak_detection_params.MinPeakHeight, ...
+    'NPeaks', peak_detection_params.NPeaks);
+findpeaks(v_r, sample_rate, 'MinPeakDistance', peak_detection_params.MinPeakDistance, ...
+    'MinPeakHeight', peak_detection_params.MinPeakHeight, ...
+    'NPeaks', peak_detection_params.NPeaks);
+xticks([0 30 60 90]);
+xlabel('Time (s)');
+ylabel('COP velocity (m/s)');
+
+% Plot COPx
+figure('Name', 'COP X-Coordinate');
+plot(t, rx, 'k');
+xticks([0 30 60]);
+title('COP x-Coordinate and Magnitude of Velocity as a Function of Time');
+xlabel('Time (s)');
+ylabel('COPx (m)');
+axis([0 60 -0.28 -0.245]);
+
+% Animation at detected peaks
+for iPeak = 1:length(LOCS)
+    figure('Name', sprintf('COP Animation Peak %d', iPeak));
+    axis([-0.40 -0.2 0.35 0.55]);
+    hold on;
+    xlabel('left-right sway [m]');
+    ylabel('front-back sway [m]');
+    
+    time_span = 20*sample_rate;
+    idx_tmp = LOCS(iPeak)-time_span:LOCS(iPeak)+time_span;
+    if min(idx_tmp) < 1 || max(idx_tmp) > length(rx)
+        continue; % Skip if window is out of bounds
+    end
+    comet(rx(idx_tmp), ry(idx_tmp), 0.2);
+end
+
+% Plot COP trajectories with covariance ellipses
+for iPeak = 1:length(LOCS)
+    figure('Name', sprintf('COP Trajectory Peak %d', iPeak));
+    time_span = 10*sample_rate;
+    time_gvs = 3*sample_rate;
+    
+    idx_tmp = LOCS(iPeak)-time_span:LOCS(iPeak)+time_span;
+    idx_gvs = LOCS(iPeak)-time_gvs:LOCS(iPeak)+time_gvs;
+    
+    if min(idx_tmp) < 1 || max(idx_tmp) > length(rx) || ...
+       min(idx_gvs) < 1 || max(idx_gvs) > length(rx)
+        continue; % Skip if window is out of bounds
+    end
+    
+    % Plot trajectories
+    plot(rx(idx_tmp), ry(idx_tmp), 'k.'); 
+    hold on;
+    plot(rx(idx_gvs), ry(idx_gvs), 'r-', 'linewidth', 2);
+    
+    % Calculate and plot covariance ellipse
+    n = 100;
+    p = 0:pi/n:2*pi;
+    C = cov([rx(idx_tmp) ry(idx_tmp)]);
+    [eigvec, eigval] = eig(C);
+    xy = [cos(p'), sin(p')] * sqrt(eigval) * eigvec';
+    x_ellips = xy(:,1) + mean(rx(idx_tmp));
+    y_ellips = xy(:,2) + mean(ry(idx_tmp));
+    plot(x_ellips, y_ellips, 'ro');
+    
+    xlabel('Left-Right Sway (m)');
+    ylabel('Front-Back sway (m)');
+    title('COP Profile During Constant Current GVS');
+    legend('Constant Current', 'GVS ON/OFF Switch');
+    axis equal;
+end
+
+% Plot force data
+figure('Name', 'Ground Reaction Forces');
+subplot(211);
+plot(t, groundReactionForces(:,3));
+ylim([810 870]);
+xticks(0:60:540);
+title('z axis');
+xlabel('Time [s]');
+ylabel('Force [N]');
+
+subplot(212);
+plot(t, groundReactionForces(:,1:2));
+ylim([-65 15]);
+xticks(0:60:540);
+title('x and y axis');
+xlabel('Time [s]');
+ylabel('Force [N]');
