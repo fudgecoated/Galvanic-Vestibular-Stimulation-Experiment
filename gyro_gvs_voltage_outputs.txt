@@ -1,0 +1,227 @@
+#include <DueTimer.h>
+#include <Wire.h>
+#include <MPU9250.h>
+#include <string>
+#include <cmath>
+
+// ----------------------------
+// Globals
+// ----------------------------
+
+// IMU values
+float gX = 0.0f, gY = 0.0f, gZ = 0.0f;   // gyro (rad/s)
+float aX = 0.0f, aY = 0.0f, aZ = 0.0f;   // accel (m/s^2)
+
+// Mode / command parsing
+int mode = 0;
+String modeString;
+String stringGain;
+String stringVoltage;
+bool receivedVoltage;
+
+// Output / DAC
+int   outputValue   = 0;      // DAC code (0–255)
+float gain          = 0.0f;   // user gain
+float steadyVoltage = 0.0f;   // (unused but kept for same functionality)
+
+const int analogOut = DAC0;   // output voltage
+const int analogRef = DAC1;   // reference (0.57V setup used by your system)
+const int analogIn  = A0;     // electrode input
+int voltageIn       = 0;      // 0–1023 (kept for same functionality)
+
+float outputInVolts = 0.0f;
+bool  dataRequiredFlag = false;
+
+// IMU object
+MPU9250 IMU(Wire, 0x68);
+
+// ----------------------------
+// Function prototypes
+// ----------------------------
+void pick_mode();
+void choose_voltage();
+void choose_gain();
+
+void proportional_voltage();
+void zero_voltage();
+void steady_voltage();
+
+float integer_to_voltage(int code);
+int   voltage_to_integer(float voltage);
+
+// ----------------------------
+// Setup / Loop
+// ----------------------------
+void setup() {
+  Serial.begin(115200);
+  Serial3.begin(115200);
+
+  // Start I2C on Due
+  Wire.begin();
+  Wire.setClock(400000);  // optional
+
+  int status = IMU.begin();
+  // Serial.print("IMU.begin() status: ");
+  // Serial.println(status);
+  if (status < 0) {
+    Serial.println("IMU init failed (wiring/address/CS pin).");
+    while (1) {}
+  }
+
+  // Initialize DAC outputs
+  analogWrite(analogRef, 0);
+  outputValue = 0;
+  analogWrite(analogOut, outputValue);
+}
+
+void loop() {
+  delay(10);
+
+  // Read IMU
+  IMU.readSensor();
+  gX = IMU.getGyroX_rads();
+  gY = IMU.getGyroY_rads();
+  gZ = IMU.getGyroZ_rads();
+
+  aX = IMU.getAccelX_mss();
+  aY = IMU.getAccelY_mss();
+  aZ = IMU.getAccelZ_mss();
+
+  // Mode selection trigger (kept as-is)
+  if (Serial3.available() != 0) {
+    pick_mode();
+  }
+
+  if (mode == 1) {
+    Serial.println("Mode 1 access");
+    zero_voltage();
+  }
+  else if (mode == 2) {
+    Serial.println("Mode 2 access");
+    Serial.print("Voltage command: ");
+    Serial.println(outputInVolts, 4);
+    steady_voltage();
+  }
+  else if (mode == 3) {
+    Serial.print("\nMode 3 access\tGain: ");
+    Serial.print(gain);
+    Serial.print("\tgX: "); Serial.print(gX);
+    Serial.print("\tgY: "); Serial.print(gY);
+    Serial.print("\tgZ: "); Serial.print(gZ);
+
+    proportional_voltage();
+
+    Serial.print("\tDAC code: ");
+    Serial.print(outputValue);
+    Serial.print("\tVout: ");
+    Serial.println(outputInVolts, 4);
+  }
+  else {
+    pick_mode();
+  }
+
+  // Keep reference steady
+  analogWrite(analogRef, 0);
+}
+
+// ----------------------------
+// Command handling
+// ----------------------------
+void choose_voltage() {
+  while (Serial3.available() == 0) {}
+
+  stringVoltage  = Serial3.readString();
+  outputInVolts  = stringVoltage.toFloat();
+
+  if (outputInVolts <= 0.0f || outputInVolts > 2.2f) {
+    mode = 0;
+  } else {
+    mode = 2;
+  }
+}
+
+void choose_gain() {
+  while (Serial3.available() == 0) {}
+
+  stringGain = Serial3.readString();
+  gain       = stringGain.toFloat();
+
+  if (gain > 0.0f) {
+    mode = 3;
+  } else {
+    mode = 0;
+  }
+}
+
+void pick_mode() {
+  while (Serial.available() == 0) {}
+
+  String stringMode = Serial.readString();
+  stringMode.trim();
+
+  if (stringMode == "1") {
+    mode = 1;
+    Serial.println("Picked mode 1.");
+  }
+  else if (stringMode == "2") {
+    Serial.println("Picked mode 2.");
+    choose_voltage();
+  }
+  else if (stringMode == "3") {
+    Serial.println("Picked mode 3.");
+    choose_gain();
+  }
+  else {
+    mode = 0;
+    Serial.println("Picked mode 0.");
+  }
+}
+
+// ----------------------------
+// Output modes
+// ----------------------------
+void proportional_voltage() {
+  // Only send voltage if rotation is in the positive direction
+  if (gY > 0.0f) {
+    float gyroGVS = sqrtf((gY * gY) + (gZ * gZ));
+    outputValue = (int)lroundf(gain * gyroGVS);
+  } else {
+    outputValue = 0;
+  }
+
+  // Clamp to 8-bit range
+  outputValue = constrain(outputValue, 0, 255);
+
+  // Convert to volts for printing/debug
+  outputInVolts = integer_to_voltage(outputValue);
+
+  // Write DAC
+  analogWrite(analogOut, outputValue);
+
+  // Keep DAC1 at 0
+  analogWrite(DAC1, 0);
+}
+
+void zero_voltage() {
+  outputInVolts = 0.0f;
+  outputValue   = voltage_to_integer(outputInVolts);
+  analogWrite(analogOut, outputValue);
+}
+
+void steady_voltage() {
+  outputValue = voltage_to_integer(outputInVolts);
+  analogWrite(analogOut, outputValue);
+}
+
+// ----------------------------
+// Helpers
+// ----------------------------
+float integer_to_voltage(int code) {
+  code = constrain(code, 0, 255);
+  return (2.2f / 255.0f) * float(code);
+}
+
+int voltage_to_integer(float voltage) {
+  voltage = constrain(voltage, 0.0f, 2.2f);
+  return (int)lroundf((255.0f / 2.2f) * voltage);
+}

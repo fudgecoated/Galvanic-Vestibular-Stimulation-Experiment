@@ -1,0 +1,254 @@
+#include <DueTimer.h>
+#include <MPU9250.h>
+#include <string>
+#include <cmath>
+float gY = 0; //Angular velocity around y axis in rads/sec
+float gX = 0;
+float gZ = 0;
+float aY = 0; //Acceleration in m/s^2
+float aX = 0;
+float aZ = 0;
+int mode = 0;
+String modeString;
+String stringGain;
+String stringVoltage;
+bool receivedVoltage;
+int outputValue = 0; //Holds value to be written to analog output
+float gain = 0;      //User specified constant for function
+float steadyVoltage = 0;
+int analogOut = DAC0; //Pin for analog output voltage
+int analogRef = DAC1; //to enable refrence of 0.57V since 0V is impossible on DACs
+int analogIn = A0;    //Pin to read in voltage from the electrodes
+int voltageIn = 0;    //variable to contain analog read value (0-1023)
+float outputInVolts;
+bool dataRequiredFlag = false;
+MPU9250 IMU(Wire, 0x68);
+
+using namespace std;
+
+void setup()
+{
+  // put your setup code here, to run once:
+
+  Serial.begin(115200);
+
+  Serial3.begin(115200);
+ 
+  Serial3.flush();
+  IMU.begin();
+  Wire.begin();
+  Serial.println(IMU.readSensor());
+  analogWrite(analogRef, 0);           //Initalize reference to 0.57V
+  outputValue = 0;                     //Ensure output value is initalized to zero during setup
+  analogWrite(analogOut, outputValue); //Ensure output value of 0 is written to the analog output
+}
+
+void loop()
+{
+  //Serial.print("Serial Monitor Working");
+  delay(10);
+  IMU.readSensor();
+  gY = IMU.getGyroY_rads();
+  gX = IMU.getGyroX_rads();
+  gZ = IMU.getGyroZ_rads();
+  aX = IMU.getAccelX_mss();
+  aY = IMU.getAccelY_mss();
+  aZ = IMU.getAccelZ_mss();
+  if (Serial3.available() != 0)
+  {
+    pick_mode();
+  }
+  if (mode == 1)
+  {
+    Serial.println("Mode 1 access");
+    zero_voltage();
+    //Serial3.flush();
+  }
+  else if (mode == 2)
+  {
+    Serial.println("Mode 2 access");
+    Serial.println(outputInVolts);
+    steady_voltage();
+    Serial3.flush();
+  }
+  else if (mode == 3)
+  {
+    Serial.print("\t\n");
+    Serial.print("Mode 3 access");
+    Serial.print("\t");
+    Serial.print(gain);
+    Serial.print("\t gX: ");
+    Serial.print(gX);
+    Serial.print("\t gY: ");
+    Serial.print(gY);
+    Serial.print("\t gZ: ");
+    Serial.print(gZ);
+    Serial.print("\t Voltage_Outputs: ");
+    Serial.print(outputInVolts);
+    Serial.print("\t");
+//    Serial3.println(Serial.print(gY));
+    proportional_voltage();
+    Serial3.flush();
+    Serial.flush();
+  }
+  else
+  {
+    pick_mode();
+    Serial3.flush();
+  }
+
+  analogWrite(analogRef, 0); //Ensure reference remains steady
+}
+void choose_voltage()
+{
+  while (Serial3.available() == 0) //Loop until user entered voltage
+  {
+  }
+  stringVoltage = Serial3.readString();
+  outputInVolts = stringVoltage.toFloat();
+//  Serial.println(stringVoltage);
+  if (outputInVolts <= 0 || outputInVolts > (2.2)) //Disallow any voltages out of range
+  {
+//    Serial.println("Invalid voltage input. ");
+    mode = 0;
+  }
+  else
+  {
+//    Serial.println("You have chosen voltage. ");
+    mode = 2;
+  }
+  Serial.flush();
+}
+void choose_gain()
+{
+  while (Serial3.available() == 0)
+  {
+    
+  }
+  stringGain = Serial3.readString();
+  gain = stringGain.toInt();
+  if (gain > 0)
+  {
+//    Serial.println("You have chosen gain. ");
+    mode = 3;
+  }
+  else
+  {
+//    Serial.println("Invalid gain input. ");
+    mode = 0;
+  }
+  Serial.flush();
+}
+void pick_mode()
+{
+  while (Serial3.available() == 0)
+  {
+  }
+  String stringMode = Serial3.readString();
+  if (stringMode == "1")
+  {
+    mode = 1;
+    Serial.println("Picked mode 1.");
+  }
+  else if (stringMode == "2")
+  {
+    Serial.println("Picked mode 2.");
+    choose_voltage();
+  }
+  else if (stringMode == "3")
+  {
+    Serial.println("Picked mode 3.");
+    choose_gain();
+  }
+  else
+  {
+    mode = 0;
+    Serial.println("Picked mode 0.");
+  }
+}
+
+void proportional_voltage()
+{
+
+  if (gY > 0)
+  { //Only send voltage if rotation is in the positive direction
+    float gyroGVS = pow((pow(gY, 2.0) + pow(gZ,2.0)),0.5);
+    Serial.print("\t");
+//    Serial.print(gain);
+    Serial.print(gyroGVS);
+   
+    outputValue = (int)(gain * gyroGVS);
+    Serial.print("\t Gain*gyroGVS: ");
+    Serial.print(outputValue);
+    outputInVolts = integer_to_voltage(outputValue);
+  }
+  else
+  {
+    outputValue = 0;
+  }
+  if (outputValue > 0 && outputValue < 255)
+  { //Write output onto analog pin
+    analogWrite(analogOut, outputValue);
+  }
+  else if (outputValue <= 0)
+  {
+    outputValue = 0;
+    analogWrite(analogOut, outputValue);
+  }
+  analogWrite(DAC1, 0);
+}
+
+void zero_voltage()
+{
+  outputInVolts = 0;
+  outputValue = voltage_to_integer(outputInVolts);
+  analogWrite(analogOut, outputValue);
+}
+
+void steady_voltage() //Steady volt
+{
+
+  outputValue = voltage_to_integer(outputInVolts);
+  analogWrite(analogOut, outputValue);
+}
+
+void read_string()
+{
+  if (Serial3.available())
+    Serial.println(Serial3.readString()); //first reads from arduino antenna then print to serial output
+}
+
+float integer_to_voltage(int integer)
+{
+  float val_256 = float(integer);
+//  Serial.print("\t");
+//  Serial.print("Value: ");
+//  
+//  Serial.print(val_256);
+  return val_256;
+  return (float((2.2) / 255.)) * float(integer);
+}
+
+//This function maps real voltage values to integer values understood by arduino
+int voltage_to_integer(float voltage)
+{
+  return 255 / (2.2) * voltage;
+}
+
+void assign_imu(float *gX, float *gY, float *gZ, float *aX, float *aY, float *aZ)
+{
+
+  Serial.print("gyro x: ");
+  Serial.println(*gX);
+  Serial.print("gyro y: ");
+  Serial.println(*gY);
+  Serial.print("gyro z: ");
+  Serial.println(*gZ);
+  Serial.print("accel x: ");
+  Serial.println(*aX);
+  Serial.print("accel y: ");
+  Serial.println(*aY);
+  Serial.print("accel z: ");
+  Serial.println(*gY);
+  delay(100);
+}
