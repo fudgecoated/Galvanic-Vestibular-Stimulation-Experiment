@@ -1,0 +1,13 @@
+﻿column_name,description,data_type,allowed_values_or_units,example
+record_id,Unique row identifier,integer,positive integer,1
+session_date,Collection date,date,YYYY-MM-DD,2026-03-04
+subject_id,De-identified participant ID,string,S01-S99,S01
+condition,Experimental condition,string,NV|VGVS|NVGVS,NVGVS
+trial_id,Trial identifier,string,T01-T99,T01
+modality,Acquisition source,string,arduino|oculus|forceplate,oculus
+file_name,Filename of recorded data,string,project convention,2026-03-04_S01_NVGVS_T01_oculus.csv
+file_path,Relative location in repository,string,repo-relative path,data/raw/oculus/
+sampling_rate_hz,Sampling rate in Hz,number,Hz,90
+units,Primary units for key variables,string,modality-specific,m
+notes,Freeform notes,string,any,baseline check
+operator,Collector initials,string,2-5 chars,MM

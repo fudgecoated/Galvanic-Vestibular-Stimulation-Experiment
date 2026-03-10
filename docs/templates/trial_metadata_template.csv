@@ -1,0 +1,2 @@
+﻿record_id,session_date,subject_id,condition,trial_id,modality,file_name,file_path,sampling_rate_hz,units,notes,operator
+1,2026-03-04,S01,NVGVS,T01,oculus,2026-03-04_S01_NVGVS_T01_oculus.csv,data/raw/oculus/,90,m,"baseline check",initials
