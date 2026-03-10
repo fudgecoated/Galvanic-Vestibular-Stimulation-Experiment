@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks
 import os
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Parameters (from analyze_reaches_cli.py)
@@ -12,6 +13,12 @@ VELOCITY_THRESHOLD_PERCENTILE = 15
 DISTANCE_THRESHOLD_PERCENT = 10
 FILTER_ORDER = 4
 FILTER_CUTOFF_HZ = 12.0
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PIPELINE_ROOT = SCRIPT_DIR.parent
+REPO_ROOT = PIPELINE_ROOT.parents[2]
+INPUT_DIR = REPO_ROOT / "data" / "raw" / "oculus"
+OUTPUT_DIR = REPO_ROOT / "results" / "oculus" / "analysis_dist" / "tables"
 
 def _butter_lowpass_filter(data, cutoff_hz, fs, order=4):
     nyquist = 0.5 * fs
@@ -56,10 +63,10 @@ def analyze_st_pilot_reaches(input_file):
                 
             except Exception as e:
                 print(f"Error parsing timestamps: {e}")
-                return
+                return False
         else:
             print("Error: No 'timestamp' column found to reconstruct time.")
-            return
+            return False
 
     # Ensure numeric and sort
     df['seconds'] = pd.to_numeric(df['seconds'], errors='coerce')
@@ -100,7 +107,7 @@ def analyze_st_pilot_reaches(input_file):
 
     if len(valid_peaks) == 0:
         print("WARNING: No peaks found. Check threshold or data.")
-        return
+        return False
 
     df['Is_Peak'] = False
     df.loc[valid_peaks, 'Is_Peak'] = True
@@ -197,12 +204,11 @@ def analyze_st_pilot_reaches(input_file):
             df.loc[mask, 'Reach_In_Trial'] = local_num
 
     # --- Save Outputs ---
-    # Save in the same directory as input file
-    output_dir = os.path.dirname(input_file)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(input_file))[0]
     
     # 1. Full segmented data
-    out_full = os.path.join(output_dir, f"{base_name}_scientific_segmented.csv")
+    out_full = OUTPUT_DIR / f"{base_name}_scientific_segmented.csv"
     df.to_csv(out_full, index=False)
     print(f"Saved segmented data to: {out_full}")
 
@@ -230,7 +236,7 @@ def analyze_st_pilot_reaches(input_file):
         reach_stats.append(stats)
 
     reach_summary = pd.DataFrame(reach_stats)
-    out_reach = os.path.join(output_dir, f"{base_name}_reach_summary.csv")
+    out_reach = OUTPUT_DIR / f"{base_name}_reach_summary.csv"
     reach_summary.to_csv(out_reach, index=False)
     print(f"Saved reach summary to: {out_reach}")
 
@@ -255,34 +261,58 @@ def analyze_st_pilot_reaches(input_file):
         trial_stats.append(stats)
 
     trial_summary = pd.DataFrame(trial_stats)
-    out_trial = os.path.join(output_dir, f"{base_name}_trial_summary.csv")
+    out_trial = OUTPUT_DIR / f"{base_name}_trial_summary.csv"
     trial_summary.to_csv(out_trial, index=False)
     print(f"Saved trial summary to: {out_trial}")
+    return True
+
+
+def _is_compatible_input_file(file_path: Path) -> bool:
+    try:
+        df = pd.read_csv(file_path, nrows=2)
+    except Exception:
+        return False
+
+    cols = set(df.columns)
+    has_signal = "HandZ" in cols
+    has_time = "seconds" in cols or "timestamp" in cols
+    return has_signal and has_time
 
 def process_directory(directory_path):
     print(f"Processing directory: {directory_path}")
     
     # Get all CSV files
-    files = [f for f in os.listdir(directory_path) if f.endswith('.csv')]
+    files = [f for f in os.listdir(directory_path) if f.lower().endswith('.csv')]
     
     # Filter out output files to avoid re-processing results
-    input_files = [f for f in files if '_segmented' not in f and '_summary' not in f]
-    
+    candidate_files = [
+        f for f in files
+        if "_segmented" not in f
+        and "_summary" not in f
+        and "data_dictionary" not in f.lower()
+    ]
+    input_files = [
+        f for f in candidate_files
+        if _is_compatible_input_file(Path(directory_path) / f)
+    ]
+
     print(f"Found {len(input_files)} input files to process: {input_files}")
     
     for filename in input_files:
         file_path = os.path.join(directory_path, filename)
         try:
-            analyze_st_pilot_reaches(file_path)
-            print(f"Successfully processed {filename}\n" + "-"*50)
+            ok = analyze_st_pilot_reaches(file_path)
+            if ok:
+                print(f"Successfully processed {filename}\n" + "-"*50)
+            else:
+                print(f"Skipped {filename}: incompatible data or no detectable reaches\n" + "-"*50)
         except Exception as e:
             print(f"Error processing {filename}: {e}\n" + "-"*50)
 
 if __name__ == "__main__":
-    # Directory containing the data
-    data_dir = "data"
-    
-    if os.path.exists(data_dir):
-        process_directory(data_dir)
+    data_dir = INPUT_DIR
+
+    if data_dir.exists():
+        process_directory(str(data_dir))
     else:
-        print(f"Error: Directory {combined_data_dir} not found.")
+        print(f"Error: Directory {data_dir} not found.")

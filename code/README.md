@@ -2,6 +2,7 @@
 
 Code organized by modality:
 - `arduino`
+- `experiment`
 - `oculus`
 - `force_plate`
 
