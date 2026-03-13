@@ -1,0 +1,10 @@
+current_path,location_type,notes
+data/interim/force_plate/MA_PILOT_JAN2625_01.mat,interim,legacy formatted/interim force plate file
+data/interim/force_plate/NA_123025_COP_01.mat,interim,legacy interim force plate file
+data/interim/force_plate/NE_010626_COP_01.mat,interim,legacy interim force plate file
+data/interim/force_plate/TA_COPILOT_05_01_01.mat,interim,legacy formatted/interim force plate file
+data/raw/force_plate/MA_PILOT_JAN2625_01.mat,raw,raw force plate file
+data/raw/force_plate/MA_test031026_01.mat,raw,added March 10 2026
+data/raw/force_plate/TA_COPILOT_05_01_01.mat,raw,raw force plate file
+data/raw/force_plate/TA_COPPILOT_121625_01.mat,raw,raw force plate file
+data/raw/force_plate/TA_COPPILOT_121625_2_01.mat,raw,raw force plate file

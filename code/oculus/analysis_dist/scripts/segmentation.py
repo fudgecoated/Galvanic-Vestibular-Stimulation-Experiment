@@ -8,7 +8,7 @@ from pathlib import Path
 # Parameters (from analyze_reaches_cli.py)
 # ---------------------------------------------------------------------------
 REACH_THRESHOLD = 0.93
-TRIAL_BREAK_THRESHOLD = 10.0
+TRIAL_BREAK_THRESHOLD = 11.0
 VELOCITY_THRESHOLD_PERCENTILE = 15
 DISTANCE_THRESHOLD_PERCENT = 10
 FILTER_ORDER = 4
@@ -100,7 +100,7 @@ def analyze_st_pilot_reaches(input_file):
     # Distance between peaks (0.2s)
     distance_samples = int(sampling_rate * 0.2)
     
-    all_peaks, _ = find_peaks(handz_filtered, prominence=min_prominence, distance=distance_samples)
+    all_peaks, _ = find_peaks(handz_filtered, prominence=max(0.005, min_prominence), distance=distance_samples)
     valid_peaks = all_peaks[handz_filtered[all_peaks] > REACH_THRESHOLD]
 
     print(f"Found {len(valid_peaks)} valid peaks above threshold {REACH_THRESHOLD}")

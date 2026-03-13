@@ -1,0 +1,29 @@
+
+  1. Normal reaching
+  2. No vision, GVS, no weight
+  3. Normal reaching
+  4. No vision, no GVS, no weight
+  5. Normal reaching
+  6. Vision, no GVS, weight A
+  7. Normal reaching
+  8. Vision, no GVS, weight A
+  9. Normal reaching
+  10. Vision, GVS, weight A
+  11. Normal reaching
+  12. No vision, no GVS, no weight
+  13. Normal reaching
+  14. No vision, GVS, weight A
+  15. Normal reaching
+  16. Vision, GVS, no weight
+  17. Normal reaching
+  18. No vision, GVS, no weight
+  19. Normal reaching
+  20. No vision, GVS, weight B
+  21. Normal reaching
+  22. No vision, GVS, weight A
+  23. Normal reaching
+  24. No vision, GVS, weight B
+  25. Normal reaching
+  26. No vision, GVS, weight A
+  27. Normal reaching
+  28. Vision, GVS, no weight

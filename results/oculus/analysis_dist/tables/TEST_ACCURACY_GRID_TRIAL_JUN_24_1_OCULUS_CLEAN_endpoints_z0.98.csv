@@ -1,0 +1,2 @@
+Reach_Number,Trial_Number,Reach_In_Trial,HandX,HandY,HandZ,Time,Error_X,Error_Y,Euclidean_Error,Hit_Bullseye,Global_Success_Index
+2,1,2,-0.3505638643784946,0.6806452608283355,0.98,0.8268848361014032,-0.3505638643784946,-0.3793547391716645,0.5165317426257414,False,1
