@@ -3,123 +3,184 @@ from __future__ import annotations
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.lines import Line2D
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from scipy.io import loadmat
-from scipy.signal import find_peaks, savgol_filter
+from scipy.signal import butter, filtfilt, find_peaks, savgol_filter
+
+
+SCRIPT_PATH = Path(__file__).resolve()
+REPO_ROOT = SCRIPT_PATH.parents[3]
+
+RAW_MAT_DIR = REPO_ROOT / "data" / "interim" / "force_plate"
+OUT_RESULTS_ROOT = REPO_ROOT / "analysis" / "results"
 
 
 # ============================================================
-# PATHS (portable for GitHub repo)
+# left forces   = samples[:, [0, 1, 2]]
+# left moments  = samples[:, [3, 4, 5]]
 # ============================================================
-# Script location:
-#   code/force_plate/scripts/COP_peak_velocity.py
-#
-# Repo root is 3 levels up:
-#   scripts -> force_plate -> code -> repo root
-REPO_ROOT = Path(__file__).resolve().parents[3]
-
-# Read raw .mat files from here
-RAW_MAT_DIR = REPO_ROOT / "data" / "raw" / "force_plate"
-
-# Save outputs here
-OUT_DATA_DIR = REPO_ROOT / "results" / "force_plate"
+LEFT_FORCE_COLS = [0, 1, 2]    # Fx, Fy, Fz
+LEFT_MOMENT_COLS = [3, 4, 5]   # Mx, My, Mz
 
 
 # ============================================================
-# DATA COLUMNS
+# CALIBRATION
 # ============================================================
-# These tell the script which columns contain COP x and y
-COPX_COL = 0
-COPY_COL = 1
+FORCE_CALIBRATION = np.diag([500.0, 500.0, 1000.0])
+MOMENT_CALIBRATION = np.diag([800.0, 250.0, 400.0])
 
 
 # ============================================================
-# SETTINGS
+# CORE PROCESSING SETTINGS
 # ============================================================
-# Light smoothing before peak detection
-SMOOTH_WINDOW_SEC = 0.35
-SMOOTH_POLYORDER = 3
+# If True, sample rate will be estimated from the time vector.
+# If False, FORCE_FREQUENCY_HZ below will be used.
+USE_TIME_VECTOR_FOR_FS = True
+FORCE_FREQUENCY_HZ = 960.0
 
-# Peak detection settings on resultant velocity
-MIN_PEAK_DISTANCE_SEC = 0.60
+# Optional trimming before any baseline/COP/velocity analysis
+TRIM_START_SEC = 0.0
+TRIM_END_SEC = 0.0
+
+# Force/moment filtering before COP calculation
+APPLY_FORCE_MOMENT_FILTER = True
+FILTER_ORDER = 3
+FILTER_CUTOFF_HZ = 25.0
+
+# Small COP smoothing before differentiation to reduce noisy velocity
+APPLY_COP_SMOOTHING_BEFORE_VELOCITY = True
+COP_SMOOTH_WINDOW_SEC = 0.05
+COP_SMOOTH_POLYORDER = 2
+
+# Optional smoothing of resultant velocity before peak detection
+APPLY_VELOCITY_SMOOTHING = True
+VELOCITY_SMOOTH_WINDOW_SEC = 0.10
+VELOCITY_SMOOTH_POLYORDER = 2
+
+
+# ============================================================
+# BASELINE / PEAK DETECTION SETTINGS
+# ============================================================
+# Adjustable baseline window
+BASELINE_WINDOW_SEC = 10.0
+
+# Threshold based on baseline distribution of resultant velocity
+BASELINE_PERCENTILE = 97.5
+
+# Peak detection settings
+MIN_PEAK_DISTANCE_SEC = 1.00
 MIN_PEAK_WIDTH_SEC = 0.03
-HEIGHT_MAD_MULT = 0.90
-PROM_MAD_MULT = 0.80
-REFINE_WINDOW_SEC = 0.25
+MIN_PEAK_PROMINENCE = 0.01   # in Vr units after true COP velocity calculation
 
-# Split trial into 30-second blocks and keep top 2 peaks
+# Optional cap on number of peaks kept overall (None = keep all)
+MAX_SELECTED_PEAKS = None
+
+# Optional block-based selection
+USE_BLOCK_SELECTION = True
 BLOCK_SEC = 30.0
 TOP_N_PER_BLOCK = 2
 
-# Stabilogram windows around each selected peak
+
+# ============================================================
+# COP SAFETY SETTINGS
+# ============================================================
+# Avoid division instability when Fz is too small
+MIN_ABS_FZ = 1e-6  # makes sure we are not dividing by 0 / near-0 Fz
+
+# Neutral point for descriptive reporting only (not required for velocity detection)
+NEUTRAL_WINDOW_SEC = 10.0
+NEUTRAL_METHOD = "median"   # switch to "mean" if needed
+
+
+# ============================================================
+# STABILOGRAM WINDOWS
+# ============================================================
 CONTEXT_HALF_SEC = 5.0
 HIGHLIGHT_HALF_SEC = 2.0
 
-# Plot style
-LW_CONTEXT = 1.1
+
+# ============================================================
+# STABILOGRAM DISPLAY SETTINGS
+# ============================================================
+STAB_PLOT_SMOOTH_WINDOW = 9
+STAB_PLOT_SMOOTH_POLYORDER = 2
+STAB_INTERP_FACTOR = 6
+
+LW_CONTEXT = 1.4
 LW_HIGHLIGHT = 2.6
 ELLIPSE_LW = 2.8
 PEAK_MARKER_SIZE = 120
 
-CONTEXT_ELLIPSE_COLOR = "#00E5FF"
-HIGHLIGHT_ELLIPSE_COLOR = "#39FF14"
+CONTEXT_ELLIPSE_COLOR = "black"
+HIGHLIGHT_ELLIPSE_COLOR = "red"
+
+CONTEXT_GRADIENT_START = "#163D99"   # deep blue
+CONTEXT_GRADIENT_END = "#B9E3FF"     # pale blue
+
+HIGHLIGHT_GRADIENT_START = "#C96A1B" # warm orange
+HIGHLIGHT_GRADIENT_END = "#FFF2A8"   # soft yellow
 
 
 # ============================================================
-# HELPERS
+# GENERAL HELPERS
 # ============================================================
 def find_input_files() -> list[Path]:
-    """Find all .mat files in the raw force_plate folder."""
+    """Find all .mat files in the repo's interim force plate folder."""
     if not RAW_MAT_DIR.exists():
-        raise FileNotFoundError(f"Working folder not found:\n  {RAW_MAT_DIR}")
+        raise FileNotFoundError(
+            f"Input folder not found:\n  {RAW_MAT_DIR}\n\n"
+            f"Expected repo structure:\n"
+            f"  repo_root/data/interim/force_plate/"
+        )
 
     mats = sorted(RAW_MAT_DIR.glob("*.mat"))
     if not mats:
         raise FileNotFoundError(f"No .mat files found in:\n  {RAW_MAT_DIR}")
-
     return mats
 
 
+def choose_input_files() -> list[Path]:
+    """
+    Show all .mat files and ask whether to process:
+    1. All files
+    2+. One specific file
+    """
+    mats = find_input_files()
+
+    print("=" * 70)
+    print("AVAILABLE .MAT FILES")
+    print("=" * 70)
+    print(" 1. ALL FILES")
+    for i, p in enumerate(mats, start=2):
+        print(f"{i:>2}. {p.name}")
+    print("=" * 70)
+
+    while True:
+        user_input = input("Select file to analyse: ").strip()
+        try:
+            idx = int(user_input)
+            if idx == 1:
+                return mats
+            if 2 <= idx <= len(mats) + 1:
+                return [mats[idx - 2]]
+            print(f"Please enter a number from 1 to {len(mats) + 1}.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
+
 def out_dir_for(mat_path: Path) -> Path:
-    """Make an output folder for each .mat file."""
+    """
+    Make an output folder for one .mat file:
+
+    analysis/results/<file_stem>/figures/velocity/
+    """
     stem = mat_path.stem
-    out_dir = OUT_DATA_DIR / stem / "figures" / "velocity"
+    out_dir = OUT_RESULTS_ROOT / stem / "figures" / "velocity"
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
-
-
-def load_cop(mat_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load time, COPx, and COPy from the MATLAB file."""
-    m = loadmat(mat_path)
-
-    if "time" not in m:
-        raise KeyError(f"'time' not found in {mat_path.name}")
-    if "samples" not in m:
-        raise KeyError(f"'samples' not found in {mat_path.name}")
-
-    t = np.asarray(m["time"]).squeeze().astype(float)
-    samples = np.asarray(m["samples"]).astype(float)
-
-    if samples.ndim != 2:
-        raise ValueError(f"'samples' is not 2D in {mat_path.name}. Got shape {samples.shape}")
-
-    if COPX_COL >= samples.shape[1] or COPY_COL >= samples.shape[1]:
-        raise IndexError(
-            f"COPX_COL/COPY_COL out of range for {mat_path.name}. "
-            f"samples has {samples.shape[1]} columns."
-        )
-
-    rx = samples[:, COPX_COL].astype(float)
-    ry = samples[:, COPY_COL].astype(float)
-
-    # Make arrays same length
-    n = min(len(t), len(rx), len(ry))
-    t = t[:n]
-    rx = rx[:n]
-    ry = ry[:n]
-
-    # Reset time so run starts at 0 s
-    t = t - t[0]
-    return t, rx, ry
 
 
 def estimate_fs(t: np.ndarray) -> float:
@@ -132,21 +193,46 @@ def estimate_fs(t: np.ndarray) -> float:
     return float(1.0 / np.median(dt))
 
 
-def compute_velocities(rx: np.ndarray, ry: np.ndarray, fs: float):
-    """Calculate x velocity, y velocity, and total resultant velocity."""
-    vx = np.diff(rx) * fs
-    vy = np.diff(ry) * fs
-    vr = np.sqrt(vx**2 + vy**2)
-    return vx, vy, vr
+def trim_time_series(
+    t: np.ndarray,
+    arrays: list[np.ndarray],
+    trim_start_sec: float,
+    trim_end_sec: float,
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    """Trim the beginning and/or end of a time series and aligned arrays."""
+    if len(t) == 0:
+        return t, arrays
+
+    t_start = float(t[0]) + max(0.0, trim_start_sec)
+    t_end = float(t[-1]) - max(0.0, trim_end_sec)
+
+    if t_end <= t_start:
+        raise ValueError(
+            f"Invalid trimming: start trim {trim_start_sec}s and end trim {trim_end_sec}s "
+            f"remove all data."
+        )
+
+    mask = (t >= t_start) & (t <= t_end)
+    t_trim = t[mask]
+    out_arrays = [arr[mask] for arr in arrays]
+
+    # reset time to start at 0
+    t_trim = t_trim - t_trim[0]
+    return t_trim, out_arrays
 
 
-def smooth_signal(x: np.ndarray, fs: float) -> np.ndarray:
-    """Smooth the signal slightly before peak detection."""
+def smooth_signal_time_based(
+    x: np.ndarray,
+    fs: float,
+    window_sec: float,
+    polyorder: int,
+) -> np.ndarray:
+    """Savitzky-Golay smoothing with a time-based window."""
     n = len(x)
     if n < 7:
         return x.copy()
 
-    window = max(5, int(round(SMOOTH_WINDOW_SEC * fs)))
+    window = max(5, int(round(window_sec * fs)))
     if window % 2 == 0:
         window += 1
     if window >= n:
@@ -156,7 +242,7 @@ def smooth_signal(x: np.ndarray, fs: float) -> np.ndarray:
     if window % 2 == 0:
         window -= 1
 
-    polyorder = min(SMOOTH_POLYORDER, window - 2)
+    polyorder = min(polyorder, window - 2)
     if polyorder < 1:
         return x.copy()
 
@@ -164,7 +250,7 @@ def smooth_signal(x: np.ndarray, fs: float) -> np.ndarray:
 
 
 def robust_baseline_and_spread(x: np.ndarray) -> tuple[float, float]:
-    """Get robust baseline and spread for adaptive thresholds."""
+    """Robust centre/spread summary."""
     x = np.asarray(x, dtype=float)
     x = x[np.isfinite(x)]
 
@@ -174,15 +260,13 @@ def robust_baseline_and_spread(x: np.ndarray) -> tuple[float, float]:
     med = float(np.median(x))
     mad = float(np.median(np.abs(x - med)))
     sigma = 1.4826 * mad
-
     if sigma <= 1e-12:
         sigma = max(float(np.std(x)), 1e-9)
-
     return med, sigma
 
 
 def window_idx(t: np.ndarray, centre_time: float, half_window_sec: float) -> tuple[int, int]:
-    """Get index bounds for a time window around a selected peak."""
+    """Get index bounds for a time window around a centre time."""
     left = centre_time - half_window_sec
     right = centre_time + half_window_sec
     i0 = int(np.searchsorted(t, left, side="left"))
@@ -191,87 +275,201 @@ def window_idx(t: np.ndarray, centre_time: float, half_window_sec: float) -> tup
 
 
 # ============================================================
-# PEAK DETECTION
+# LOAD RAW FORCE/MOMENT DATA
 # ============================================================
-def refine_peaks_to_raw(v_raw: np.ndarray, coarse_peaks: np.ndarray, fs: float) -> np.ndarray:
-    """Snap smoothed-signal peaks onto the true nearby raw peak."""
-    if len(coarse_peaks) == 0:
-        return np.array([], dtype=int)
+def load_raw_mat(mat_path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Load samples and time from the MATLAB file."""
+    m = loadmat(mat_path)
 
-    half_width = max(1, int(round(REFINE_WINDOW_SEC * fs)))
-    refined = []
+    if "samples" not in m:
+        raise KeyError(f"'samples' not found in {mat_path.name}")
+    if "time" not in m:
+        raise KeyError(f"'time' not found in {mat_path.name}")
 
-    for pk in coarse_peaks:
-        left = max(0, pk - half_width)
-        right = min(len(v_raw), pk + half_width + 1)
-        local = v_raw[left:right]
-        if len(local) == 0:
-            continue
-        refined.append(left + int(np.argmax(local)))
+    samples = np.asarray(m["samples"], dtype=float)
+    t = np.asarray(m["time"]).squeeze().astype(float)
 
-    return np.array(sorted(set(refined)), dtype=int)
+    if samples.ndim != 2:
+        raise ValueError(f"'samples' is not 2D in {mat_path.name}. Got shape {samples.shape}")
+    if samples.shape[1] < 6:
+        raise ValueError(f"'samples' has too few columns in {mat_path.name}: {samples.shape[1]}")
+
+    n = min(len(t), samples.shape[0])
+    t = t[:n]
+    samples = samples[:n, :]
+
+    # start time at 0
+    t = t - t[0]
+    return t, samples
 
 
-def detect_candidate_peaks(vr_raw: np.ndarray, fs: float):
-    """Detect candidate peaks on resultant velocity."""
-    vr_smooth = smooth_signal(vr_raw, fs)
+def calibrate_left_force_moment(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Extract left-side force/moment channels and apply calibration.
+    """
+    left_forces_raw = samples[:, LEFT_FORCE_COLS]
+    left_moments_raw = samples[:, LEFT_MOMENT_COLS]
 
-    baseline, spread = robust_baseline_and_spread(vr_smooth)
-    height_threshold = baseline + HEIGHT_MAD_MULT * spread
-    prominence_threshold = PROM_MAD_MULT * spread
+    left_forces = left_forces_raw @ FORCE_CALIBRATION
+    left_moments = left_moments_raw @ MOMENT_CALIBRATION
+
+    return left_forces, left_moments
+
+
+def butterworth_lowpass(data: np.ndarray, fs: float, cutoff_hz: float, order: int) -> np.ndarray:
+    """Apply zero-phase Butterworth low-pass filtering column-wise."""
+    if cutoff_hz <= 0:
+        return data.copy()
+
+    nyq = 0.5 * fs
+    wn = cutoff_hz / nyq
+    if wn >= 1.0:
+        return data.copy()
+
+    b, a = butter(order, wn, btype="low")
+    return filtfilt(b, a, data, axis=0)
+
+
+def compute_true_cop_from_left_plate(
+    left_forces: np.ndarray,
+    left_moments: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute true COP from left force plate:
+
+        COPy = Mx / Fz
+        COPx = -My / Fz
+
+    Returns:
+        rx = COPx
+        ry = COPy
+        fz = Fz
+    """
+    fx, fy, fz = left_forces[:, 0], left_forces[:, 1], left_forces[:, 2]
+    mx, my, mz = left_moments[:, 0], left_moments[:, 1], left_moments[:, 2]
+
+    safe_fz = np.where(np.abs(fz) < MIN_ABS_FZ, np.nan, fz)
+
+    ry = mx / safe_fz
+    rx = -my / safe_fz
+
+    return rx, ry, fz
+
+
+def compute_neutral_point(rx: np.ndarray, ry: np.ndarray, t: np.ndarray) -> tuple[float, float]:
+    """
+    Compute neutral point (adjustable window).
+    """
+    mask = t <= NEUTRAL_WINDOW_SEC
+    if not np.any(mask):
+        mask = np.ones_like(t, dtype=bool)
+
+    if NEUTRAL_METHOD.lower() == "mean":
+        return float(np.mean(rx[mask])), float(np.mean(ry[mask]))
+    else:
+        return float(np.median(rx[mask])), float(np.median(ry[mask]))
+
+
+# ============================================================
+# VELOCITY CALCULATION
+# ============================================================
+def compute_cop_velocity(rx: np.ndarray, ry: np.ndarray, fs: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute COP velocity from true COP.
+
+        vx = diff(rx) * fs
+        vy = diff(ry) * fs
+        vr = sqrt(vx^2 + vy^2)
+    """
+    rx_use = rx.copy()
+    ry_use = ry.copy()
+
+    if APPLY_COP_SMOOTHING_BEFORE_VELOCITY:
+        rx_use = smooth_signal_time_based(rx_use, fs, COP_SMOOTH_WINDOW_SEC, COP_SMOOTH_POLYORDER)
+        ry_use = smooth_signal_time_based(ry_use, fs, COP_SMOOTH_WINDOW_SEC, COP_SMOOTH_POLYORDER)
+
+    vx = np.diff(rx_use) * fs
+    vy = np.diff(ry_use) * fs
+    vr = np.sqrt(vx ** 2 + vy ** 2)
+
+    return vx, vy, vr
+
+
+# ============================================================
+# BASELINE + PEAK DETECTION
+# ============================================================
+def baseline_threshold_from_percentile(signal: np.ndarray, t_signal: np.ndarray) -> tuple[float, dict]:
+    """
+    Compute an absolute peak threshold from the baseline window using a percentile.
+    """
+    mask = t_signal <= BASELINE_WINDOW_SEC
+    if not np.any(mask):
+        mask = np.ones_like(t_signal, dtype=bool)
+
+    baseline_vals = signal[mask]
+    baseline_vals = baseline_vals[np.isfinite(baseline_vals)]
+
+    if len(baseline_vals) == 0:
+        threshold = np.nan
+        info = {
+            "baseline_n": 0,
+            "baseline_percentile": BASELINE_PERCENTILE,
+            "threshold": threshold,
+            "baseline_median": np.nan,
+            "baseline_sigma_robust": np.nan,
+        }
+        return threshold, info
+
+    baseline_median, baseline_sigma = robust_baseline_and_spread(baseline_vals)
+    threshold = float(np.percentile(baseline_vals, BASELINE_PERCENTILE))
+
+    info = {
+        "baseline_n": int(len(baseline_vals)),
+        "baseline_percentile": BASELINE_PERCENTILE,
+        "threshold": threshold,
+        "baseline_median": baseline_median,
+        "baseline_sigma_robust": baseline_sigma,
+    }
+    return threshold, info
+
+
+def detect_velocity_peaks(vr_raw: np.ndarray, tv: np.ndarray, fs: float):
+    """
+    Detect peaks on resultant COP velocity using:
+    - baseline percentile threshold
+    - minimum prominence
+    - minimum distance
+    - optional minimum width
+    """
+    vr_use = vr_raw.copy()
+    if APPLY_VELOCITY_SMOOTHING:
+        vr_use = smooth_signal_time_based(vr_use, fs, VELOCITY_SMOOTH_WINDOW_SEC, VELOCITY_SMOOTH_POLYORDER)
+
+    absolute_threshold, baseline_info = baseline_threshold_from_percentile(vr_use, tv)
 
     min_distance_samples = max(1, int(round(MIN_PEAK_DISTANCE_SEC * fs)))
     min_width_samples = max(1, int(round(MIN_PEAK_WIDTH_SEC * fs)))
 
-    coarse_peaks, props = find_peaks(
-        vr_smooth,
-        height=height_threshold,
-        prominence=prominence_threshold,
+    peaks, props = find_peaks(
+        vr_use,
+        height=absolute_threshold,
+        prominence=MIN_PEAK_PROMINENCE,
         distance=min_distance_samples,
         width=min_width_samples,
     )
 
-    # If too strict, relax slightly
-    if len(coarse_peaks) == 0:
-        coarse_peaks, props = find_peaks(
-            vr_smooth,
-            height=baseline + 0.55 * spread,
-            prominence=0.45 * spread,
-            distance=min_distance_samples,
-        )
-
-    refined_peaks = refine_peaks_to_raw(vr_raw, coarse_peaks, fs)
-
-    coarse_peaks = np.asarray(coarse_peaks, dtype=int)
-    coarse_proms = np.asarray(props.get("prominences", np.zeros(len(coarse_peaks))), dtype=float)
-
-    peak_heights = []
-    peak_proms = []
-
-    for rpk in refined_peaks:
-        if len(coarse_peaks) == 0:
-            continue
-        j = int(np.argmin(np.abs(coarse_peaks - rpk)))
-        peak_heights.append(float(vr_raw[rpk]))
-        peak_proms.append(float(coarse_proms[j]))
-
-    peak_heights = np.asarray(peak_heights, dtype=float)
-    peak_proms = np.asarray(peak_proms, dtype=float)
+    peak_heights = vr_use[peaks] if len(peaks) else np.array([], dtype=float)
+    peak_proms = np.asarray(props.get("prominences", np.zeros(len(peaks))), dtype=float)
 
     info = {
-        "baseline": baseline,
-        "spread": spread,
-        "height_threshold": height_threshold,
-        "prominence_threshold": prominence_threshold,
-        "n_candidates": int(len(refined_peaks)),
+        "absolute_threshold": absolute_threshold,
+        "baseline_info": baseline_info,
+        "n_candidates": int(len(peaks)),
     }
 
-    return refined_peaks, peak_heights, peak_proms, vr_smooth, info
+    return peaks.astype(int), peak_heights, peak_proms, vr_use, info
 
 
-# ============================================================
-# TOP N PEAKS PER 30-SECOND BLOCK
-# ============================================================
 def select_top_n_per_block(
     candidate_peaks: np.ndarray,
     peak_times: np.ndarray,
@@ -279,7 +477,7 @@ def select_top_n_per_block(
     block_sec: float = BLOCK_SEC,
     top_n: int = TOP_N_PER_BLOCK,
 ) -> list[dict]:
-    """In each 30-second block, keep the top N tallest velocity peaks."""
+    """In each block, keep the top N tallest peaks."""
     selected: list[dict] = []
 
     if len(candidate_peaks) == 0:
@@ -302,7 +500,6 @@ def select_top_n_per_block(
 
         order = np.argsort(block_peak_heights)[::-1]
         keep = order[:top_n]
-
         keep_sorted_by_time = keep[np.argsort(block_peak_times[keep])]
 
         for rank_num, local_k in enumerate(keep_sorted_by_time, start=1):
@@ -319,10 +516,52 @@ def select_top_n_per_block(
     return selected
 
 
+def select_final_peaks(candidate_peaks: np.ndarray, peak_times: np.ndarray, peak_heights: np.ndarray) -> list[dict]:
+    """
+    Final peak selection logic:
+    - optionally top N per block
+    - otherwise keep all
+    - optionally cap total number kept
+    """
+    if len(candidate_peaks) == 0:
+        return []
+
+    if USE_BLOCK_SELECTION:
+        selected = select_top_n_per_block(
+            candidate_peaks=candidate_peaks,
+            peak_times=peak_times,
+            peak_heights=peak_heights,
+            block_sec=BLOCK_SEC,
+            top_n=TOP_N_PER_BLOCK,
+        )
+    else:
+        selected = [
+            {
+                "block_index": 0,
+                "rank_in_block": i + 1,
+                "peak_idx": int(pk),
+                "peak_time": float(pt),
+                "peak_height": float(ph),
+            }
+            for i, (pk, pt, ph) in enumerate(zip(candidate_peaks, peak_times, peak_heights))
+        ]
+
+    if MAX_SELECTED_PEAKS is not None and len(selected) > MAX_SELECTED_PEAKS:
+        selected = sorted(selected, key=lambda d: d["peak_height"], reverse=True)[:MAX_SELECTED_PEAKS]
+        selected = sorted(selected, key=lambda d: d["peak_time"])
+
+    return selected
+
+
 # ============================================================
-# ELLIPSE
+# STABILOGRAM DISPLAY HELPERS
 # ============================================================
-def covariance_ellipse_points(x: np.ndarray, y: np.ndarray, n_std: float = 1.0, n_points: int = 220):
+def covariance_ellipse_points(
+    x: np.ndarray,
+    y: np.ndarray,
+    n_std: float = 1.0,
+    n_points: int = 220,
+):
     """Build a covariance ellipse for the stabilogram."""
     mask = np.isfinite(x) & np.isfinite(y)
     x = x[mask]
@@ -346,8 +585,193 @@ def covariance_ellipse_points(x: np.ndarray, y: np.ndarray, n_std: float = 1.0, 
     return ellipse[:, 0], ellipse[:, 1]
 
 
+def make_segments(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Convert x/y points into line segments for gradient plotting."""
+    points = np.column_stack((x, y)).reshape(-1, 1, 2)
+    return np.concatenate([points[:-1], points[1:]], axis=1)
+
+
+def make_custom_cmap(color_start: str, color_end: str) -> LinearSegmentedColormap:
+    """Create a custom 2-colour gradient map."""
+    return LinearSegmentedColormap.from_list(
+        "custom_time_gradient",
+        [color_start, color_end]
+    )
+
+
+def smooth_for_plot(x: np.ndarray, window: int = STAB_PLOT_SMOOTH_WINDOW, polyorder: int = STAB_PLOT_SMOOTH_POLYORDER) -> np.ndarray:
+    """Light smoothing for stabilogram display only."""
+    x = np.asarray(x, dtype=float)
+    n = len(x)
+
+    if n < 7:
+        return x.copy()
+
+    window = min(window, n if n % 2 == 1 else n - 1)
+    if window < 5:
+        return x.copy()
+    if window % 2 == 0:
+        window -= 1
+
+    polyorder = min(polyorder, window - 2)
+    if polyorder < 1:
+        return x.copy()
+
+    return savgol_filter(x, window_length=window, polyorder=polyorder, mode="interp")
+
+
+def upsample_path(x: np.ndarray, y: np.ndarray, t: np.ndarray, factor: int = STAB_INTERP_FACTOR):
+    """Increase point density so the stabilogram gradient looks smoother."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    t = np.asarray(t, dtype=float)
+
+    if len(x) < 2 or factor <= 1:
+        return x, y, t
+
+    idx = np.arange(len(x), dtype=float)
+    idx_new = np.linspace(0, len(x) - 1, len(x) * factor)
+
+    x_new = np.interp(idx_new, idx, x)
+    y_new = np.interp(idx_new, idx, y)
+    t_new = np.interp(idx_new, idx, t)
+
+    return x_new, y_new, t_new
+
+
+def prepare_stabilogram_path(x: np.ndarray, y: np.ndarray, t: np.ndarray):
+    """Smooth and densify path for cleaner plotting only."""
+    x_s = smooth_for_plot(x)
+    y_s = smooth_for_plot(y)
+    x_u, y_u, t_u = upsample_path(x_s, y_s, t, factor=STAB_INTERP_FACTOR)
+    return x_u, y_u, t_u
+
+
+def plot_gradient_line_by_time(
+    ax: plt.Axes,
+    x: np.ndarray,
+    y: np.ndarray,
+    t: np.ndarray,
+    color_start: str,
+    color_end: str,
+    linewidth: float,
+    alpha: float = 1.0,
+    zorder: int = 2,
+    show_start_end: bool = False,
+):
+    """
+    Plot a trajectory with segment colour representing time progression.
+
+    Start = start colour
+    Finish = end colour
+    """
+    if len(x) < 2 or len(y) < 2 or len(t) < 2:
+        return None
+
+    segments = make_segments(x, y)
+    seg_t = 0.5 * (t[:-1] + t[1:])
+
+    t0 = float(seg_t.min())
+    t1 = float(seg_t.max())
+    if abs(t1 - t0) < 1e-12:
+        values = np.zeros_like(seg_t)
+    else:
+        values = (seg_t - t0) / (t1 - t0)
+
+    cmap = make_custom_cmap(color_start, color_end)
+
+    lc = LineCollection(
+        segments,
+        cmap=cmap,
+        linewidths=linewidth,
+        alpha=alpha,
+        zorder=zorder,
+        capstyle="round",
+        joinstyle="round",
+    )
+    lc.set_array(values)
+    ax.add_collection(lc)
+
+    if show_start_end:
+        ax.scatter(
+            x[0], y[0],
+            s=70, marker="o",
+            color=color_start, edgecolors="black", linewidths=0.8,
+            zorder=zorder + 2,
+        )
+        ax.scatter(
+            x[-1], y[-1],
+            s=90, marker="X",
+            color=color_end, edgecolors="black", linewidths=0.8,
+            zorder=zorder + 2,
+        )
+
+    return cmap
+
+
+def add_bottom_right_legend_block(
+    ax: plt.Axes,
+    context_cmap: LinearSegmentedColormap,
+    highlight_cmap: LinearSegmentedColormap,
+):
+    """Legend block."""
+    grad = np.linspace(0, 1, 256)[None, :]
+
+    ellipse_handles = [
+        Line2D([0], [0], color=CONTEXT_ELLIPSE_COLOR, lw=ELLIPSE_LW, linestyle="--",
+               label="Context ellipse (1σ)"),
+        Line2D([0], [0], color=HIGHLIGHT_ELLIPSE_COLOR, lw=ELLIPSE_LW, linestyle="--",
+               label="Highlight ellipse (1σ)"),
+    ]
+    leg = ax.legend(
+        handles=ellipse_handles,
+        loc="lower right",
+        bbox_to_anchor=(0.995, 0.005),
+        framealpha=0.9,
+        borderpad=0.35,
+        labelspacing=0.35,
+        handlelength=2.0,
+        handletextpad=0.5,
+    )
+    ax.add_artist(leg)
+
+    ax_c = inset_axes(
+        ax,
+        width="24%",
+        height="2.9%",
+        loc="lower right",
+        bbox_to_anchor=(0.0, 0.115, 1.0, 1.0),
+        bbox_transform=ax.transAxes,
+        borderpad=0.8,
+    )
+    ax_c.imshow(grad, aspect="auto", cmap=context_cmap, origin="lower")
+    ax_c.set_xticks([0, 255])
+    ax_c.set_xticklabels(["start", "finish"], fontsize=8)
+    ax_c.set_yticks([])
+    ax_c.set_title("Context", fontsize=9, pad=2)
+    for spine in ax_c.spines.values():
+        spine.set_linewidth(0.8)
+
+    ax_h = inset_axes(
+        ax,
+        width="24%",
+        height="2.9%",
+        loc="lower right",
+        bbox_to_anchor=(0.0, 0.185, 1.0, 1.0),
+        bbox_transform=ax.transAxes,
+        borderpad=0.8,
+    )
+    ax_h.imshow(grad, aspect="auto", cmap=highlight_cmap, origin="lower")
+    ax_h.set_xticks([0, 255])
+    ax_h.set_xticklabels(["start", "finish"], fontsize=8)
+    ax_h.set_yticks([])
+    ax_h.set_title("Highlight", fontsize=9, pad=2)
+    for spine in ax_h.spines.values():
+        spine.set_linewidth(0.8)
+
+
 # ============================================================
-# PLOTS
+# MAIN PLOTTING
 # ============================================================
 def add_30s_blocks(ax: plt.Axes, t_start: float, t_end: float):
     """Add alternating 30-second shading to the plot."""
@@ -370,7 +794,7 @@ def plot_three_panel_velocity(
     selected_peak_indices: np.ndarray,
     out_path: Path,
 ):
-    """Plot x velocity, y velocity, and total velocity."""
+    """Plot Vx, Vy, and resultant velocity."""
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
 
     t_end = float(tv[-1])
@@ -384,8 +808,8 @@ def plot_three_panel_velocity(
             marker="*", s=PEAK_MARKER_SIZE, color="red",
             edgecolors="black", linewidths=0.8, zorder=5
         )
-    ax.set_ylabel("Vx (m/s)")
-    ax.set_title(f"{stem} | Vx, Vy, Vr with top peaks per 30 s block")
+    ax.set_ylabel("Vx")
+    ax.set_title(f"{stem} | True COP velocity (left plate)")
 
     ax = axes[1]
     add_30s_blocks(ax, 0.0, t_end)
@@ -396,7 +820,7 @@ def plot_three_panel_velocity(
             marker="*", s=PEAK_MARKER_SIZE, color="red",
             edgecolors="black", linewidths=0.8, zorder=5
         )
-    ax.set_ylabel("Vy (m/s)")
+    ax.set_ylabel("Vy")
 
     ax = axes[2]
     add_30s_blocks(ax, 0.0, t_end)
@@ -407,7 +831,7 @@ def plot_three_panel_velocity(
             marker="*", s=PEAK_MARKER_SIZE, color="red",
             edgecolors="black", linewidths=0.8, zorder=5
         )
-    ax.set_ylabel("Vr (m/s)")
+    ax.set_ylabel("Vr")
     ax.set_xlabel("Time (s)")
 
     for ax in axes:
@@ -423,35 +847,39 @@ def plot_velocity_diagnostic(
     tv: np.ndarray,
     vr_raw: np.ndarray,
     vr_smooth: np.ndarray,
+    absolute_threshold: float,
     candidate_peaks: np.ndarray,
     selected_peak_indices: np.ndarray,
     out_path: Path,
 ):
-    """Plot raw and smoothed velocity with candidate and selected peaks."""
+    """Plot raw and smoothed resultant velocity with threshold and peaks."""
     fig, ax = plt.subplots(figsize=(14, 5))
     add_30s_blocks(ax, 0.0, float(tv[-1]))
 
     ax.plot(tv, vr_raw, linewidth=1.0, alpha=0.45, label="Raw Vr")
     ax.plot(tv, vr_smooth, linewidth=1.4, label="Smoothed Vr")
 
+    if np.isfinite(absolute_threshold):
+        ax.axhline(absolute_threshold, linestyle="--", linewidth=1.2, alpha=0.8, label="Baseline percentile threshold")
+
     if len(candidate_peaks):
         ax.scatter(
-            tv[candidate_peaks], vr_raw[candidate_peaks],
+            tv[candidate_peaks], vr_smooth[candidate_peaks],
             s=24, color="grey", alpha=0.7,
             label=f"Candidate peaks (n={len(candidate_peaks)})"
         )
 
     if len(selected_peak_indices):
         ax.scatter(
-            tv[selected_peak_indices], vr_raw[selected_peak_indices],
+            tv[selected_peak_indices], vr_smooth[selected_peak_indices],
             marker="*", s=PEAK_MARKER_SIZE,
             color="red", edgecolors="black", linewidths=0.8, zorder=6,
             label=f"Selected peaks (n={len(selected_peak_indices)})"
         )
 
-    ax.set_title(f"{stem} | Resultant velocity peak selection by 30 s blocks")
+    ax.set_title(f"{stem} | Resultant velocity peak detection")
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Vr (m/s)")
+    ax.set_ylabel("Vr")
     ax.grid(True, alpha=0.35)
     ax.legend(loc="upper right")
 
@@ -460,123 +888,205 @@ def plot_velocity_diagnostic(
     plt.close(fig)
 
 
-def plot_peak_stabilogram_black_red(
+def plot_peak_stabilogram_gradient(
     x: np.ndarray,
     y: np.ndarray,
+    t_win: np.ndarray,
     highlight_mask: np.ndarray,
     title: str,
     out_path: Path,
 ):
-    """Plot the stabilogram around one selected velocity peak."""
+    """Plot stabilogram around one selected peak."""
     if len(x) < 2:
         return
 
-    fig, ax = plt.subplots(figsize=(8, 8))
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_axes([0.11, 0.10, 0.82, 0.82])
 
-    ax.plot(x, y, color="black", linewidth=LW_CONTEXT, label=f"Context ±{CONTEXT_HALF_SEC:.0f}s")
+    context_cmap = make_custom_cmap(CONTEXT_GRADIENT_START, CONTEXT_GRADIENT_END)
+    highlight_cmap = make_custom_cmap(HIGHLIGHT_GRADIENT_START, HIGHLIGHT_GRADIENT_END)
 
-    if np.any(highlight_mask):
-        ax.plot(
-            x[highlight_mask], y[highlight_mask],
-            color="red", linewidth=LW_HIGHLIGHT,
-            label=f"Highlight ±{HIGHLIGHT_HALF_SEC:.0f}s"
+    x_plot, y_plot, t_plot = prepare_stabilogram_path(x, y, t_win)
+
+    plot_gradient_line_by_time(
+        ax=ax,
+        x=x_plot,
+        y=y_plot,
+        t=t_plot,
+        color_start=CONTEXT_GRADIENT_START,
+        color_end=CONTEXT_GRADIENT_END,
+        linewidth=LW_CONTEXT,
+        alpha=0.65,
+        zorder=2,
+        show_start_end=True,
+    )
+
+    xh = x[highlight_mask]
+    yh = y[highlight_mask]
+    if np.any(highlight_mask) and len(xh) >= 2:
+        th = t_win[highlight_mask]
+        xh_plot, yh_plot, th_plot = prepare_stabilogram_path(xh, yh, th)
+
+        plot_gradient_line_by_time(
+            ax=ax,
+            x=xh_plot,
+            y=yh_plot,
+            t=th_plot,
+            color_start=HIGHLIGHT_GRADIENT_START,
+            color_end=HIGHLIGHT_GRADIENT_END,
+            linewidth=LW_HIGHLIGHT,
+            alpha=0.90,
+            zorder=4,
+            show_start_end=True,
         )
 
     xe, ye = covariance_ellipse_points(x, y)
     if xe.size:
         ax.plot(
-            xe, ye, linestyle="--", linewidth=ELLIPSE_LW,
-            color=CONTEXT_ELLIPSE_COLOR, label="Context cov ellipse (1σ)"
+            xe, ye,
+            linestyle="--",
+            linewidth=ELLIPSE_LW,
+            color=CONTEXT_ELLIPSE_COLOR,
+            zorder=5,
         )
 
-    xh = x[highlight_mask]
-    yh = y[highlight_mask]
     xe2, ye2 = covariance_ellipse_points(xh, yh)
     if xe2.size:
         ax.plot(
-            xe2, ye2, linestyle="--", linewidth=ELLIPSE_LW,
-            color=HIGHLIGHT_ELLIPSE_COLOR, label="Highlight cov ellipse (1σ)"
+            xe2, ye2,
+            linestyle="--",
+            linewidth=ELLIPSE_LW,
+            color=HIGHLIGHT_ELLIPSE_COLOR,
+            zorder=6,
         )
 
-    ax.set_title(title)
+    ax.set_title(title, fontsize=16, pad=14)
     ax.set_xlabel("COPx (m)")
     ax.set_ylabel("COPy (m)")
-    ax.grid(True, alpha=0.4)
+    ax.grid(True, alpha=0.35)
     ax.axis("equal")
-    ax.legend(loc="lower left")
 
-    fig.tight_layout()
+    add_bottom_right_legend_block(ax, context_cmap, highlight_cmap)
+
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
 
 
 # ============================================================
-# MAIN PER FILE
+# RUN ONE FILE
 # ============================================================
-def run_one_file(mat_path: Path):
-    """Run the full velocity-based analysis on one file."""
+def run_one_file(mat_path: Path) -> Path:
+    """Run the full true-COP velocity analysis on one file."""
     stem = mat_path.stem
     out_dir = out_dir_for(mat_path)
 
-    t, rx, ry = load_cop(mat_path)
-    fs = estimate_fs(t)
+    # --------------------------------------------------------
+    # Load raw data
+    # --------------------------------------------------------
+    t, samples = load_raw_mat(mat_path)
 
-    # Calculate velocities
-    vx, vy, vr = compute_velocities(rx, ry, fs)
-    tv = t[1:]
+    # Sampling frequency
+    fs = estimate_fs(t) if USE_TIME_VECTOR_FOR_FS else FORCE_FREQUENCY_HZ
 
-    # Detect candidate peaks on resultant velocity
-    candidate_peaks, peak_heights, peak_proms, vr_smooth, info = detect_candidate_peaks(vr, fs)
-    peak_times = tv[candidate_peaks] if len(candidate_peaks) else np.array([])
+    # --------------------------------------------------------
+    # Extract + calibrate left force/moment channels
+    # --------------------------------------------------------
+    left_forces, left_moments = calibrate_left_force_moment(samples)
 
-    # Keep top 2 peaks in each 30-second block
-    selected = select_top_n_per_block(
-        candidate_peaks=candidate_peaks,
-        peak_times=peak_times,
-        peak_heights=peak_heights,
-        block_sec=BLOCK_SEC,
-        top_n=TOP_N_PER_BLOCK,
+    # Optional filtering before COP calculation
+    if APPLY_FORCE_MOMENT_FILTER:
+        left_forces = butterworth_lowpass(left_forces, fs, FILTER_CUTOFF_HZ, FILTER_ORDER)
+        left_moments = butterworth_lowpass(left_moments, fs, FILTER_CUTOFF_HZ, FILTER_ORDER)
+
+    # --------------------------------------------------------
+    # Trim start/end before baseline and COP analysis
+    # --------------------------------------------------------
+    t, [left_forces, left_moments] = trim_time_series(
+        t,
+        [left_forces, left_moments],
+        trim_start_sec=TRIM_START_SEC,
+        trim_end_sec=TRIM_END_SEC,
     )
 
+    # --------------------------------------------------------
+    # Compute true COP from left plate
+    # --------------------------------------------------------
+    rx, ry, fz = compute_true_cop_from_left_plate(left_forces, left_moments)
+
+    # Remove samples where Fz is unusable
+    valid = np.isfinite(rx) & np.isfinite(ry) & np.isfinite(fz)
+    t = t[valid]
+    rx = rx[valid]
+    ry = ry[valid]
+    fz = fz[valid]
+
+    if len(t) < 10:
+        raise ValueError(f"Too few valid COP samples after processing in {mat_path.name}")
+
+    # Neutral point for descriptive reporting
+    neutral_x, neutral_y = compute_neutral_point(rx, ry, t)
+
+    # --------------------------------------------------------
+    # Compute velocity from true COP
+    # --------------------------------------------------------
+    vx, vy, vr = compute_cop_velocity(rx, ry, fs)
+    tv = t[1:]
+
+    # --------------------------------------------------------
+    # Peak detection on resultant velocity
+    # --------------------------------------------------------
+    candidate_peaks, peak_heights, peak_proms, vr_use, info = detect_velocity_peaks(vr, tv, fs)
+    peak_times = tv[candidate_peaks] if len(candidate_peaks) else np.array([])
+
+    selected = select_final_peaks(candidate_peaks, peak_times, peak_heights)
     selected_peak_indices = np.array([item["peak_idx"] for item in selected], dtype=int) if selected else np.array([], dtype=int)
 
+    # --------------------------------------------------------
+    # Console reporting
+    # --------------------------------------------------------
     print(f"  File: {mat_path.name}")
-    print(f"  fs:                    {fs:.3f} Hz")
-    print(f"  Candidate peaks:       {len(candidate_peaks)}")
-    print(f"  Selected peaks:        {len(selected_peak_indices)}")
+    print(f"  fs:                         {fs:.3f} Hz")
+    print(f"  Trim start / end:           {TRIM_START_SEC:.2f}s / {TRIM_END_SEC:.2f}s")
+    print(f"  Neutral point ({NEUTRAL_METHOD}): ({neutral_x:.6f}, {neutral_y:.6f})")
+    print(f"  Baseline window:            first {BASELINE_WINDOW_SEC:.2f}s")
+    print(f"  Baseline percentile:        {BASELINE_PERCENTILE}")
+    print(f"  Threshold (Vr):             {info['absolute_threshold']:.6f}")
+    print(f"  Candidate peaks:            {len(candidate_peaks)}")
+    print(f"  Selected peaks:             {len(selected_peak_indices)}")
     for item in selected:
         print(
             f"    block={item['block_index']:02d} "
             f"rank={item['rank_in_block']} "
             f"time={item['peak_time']:.2f}s "
-            f"height={item['peak_height']:.4f}"
+            f"height={item['peak_height']:.6f}"
         )
 
-    # Save main 3-panel velocity figure
+    # --------------------------------------------------------
+    # Save plots
+    # --------------------------------------------------------
     plot_three_panel_velocity(
         stem=stem,
         tv=tv,
         vx=vx,
         vy=vy,
-        vr=vr,
+        vr=vr_use,
         selected_peak_indices=selected_peak_indices,
-        out_path=out_dir / "Vx_Vy_Vr_3panel_topPeaksPer30sBlock.png",
+        out_path=out_dir / "Vx_Vy_Vr_trueCOP_3panel.png",
     )
 
-    # Save diagnostic figure
     plot_velocity_diagnostic(
         stem=stem,
         tv=tv,
         vr_raw=vr,
-        vr_smooth=vr_smooth,
+        vr_smooth=vr_use,
+        absolute_threshold=info["absolute_threshold"],
         candidate_peaks=candidate_peaks,
         selected_peak_indices=selected_peak_indices,
-        out_path=out_dir / "Vr_peak_detection_topPeaksPer30sBlock.png",
+        out_path=out_dir / "Vr_trueCOP_peak_detection.png",
     )
 
-    # Save a stabilogram for each selected peak
+    # One stabilogram per selected peak
     for global_num, item in enumerate(selected, start=1):
-        pk_v = item["peak_idx"]
         pk_time = item["peak_time"]
         block_idx = item["block_index"]
         rank_in_block = item["rank_in_block"]
@@ -586,46 +1096,56 @@ def run_one_file(mat_path: Path):
 
         rx_win = rx[i0:i1]
         ry_win = ry[i0:i1]
+        t_win = t[i0:i1]
 
+        # highlight indices must be relative to the context window start i0,
+        # not the full signal.
         highlight_mask = np.zeros(i1 - i0, dtype=bool)
         a = max(0, h0 - i0)
-        b = max(0, h1 - i0)
+        b = min(i1 - i0, h1 - i0)
         highlight_mask[a:b] = True
 
-        plot_peak_stabilogram_black_red(
+        plot_peak_stabilogram_gradient(
             x=rx_win,
             y=ry_win,
+            t_win=t_win,
             highlight_mask=highlight_mask,
             title=(
                 f"Block {block_idx:02d} | Peak rank {rank_in_block} | t = {pk_time:.2f} s\n"
-                f"Context ±{CONTEXT_HALF_SEC:.0f}s (black), "
-                f"Highlight ±{HIGHLIGHT_HALF_SEC:.0f}s (red)"
+                f"Context ±{CONTEXT_HALF_SEC:.0f}s, Highlight ±{HIGHLIGHT_HALF_SEC:.0f}s"
             ),
             out_path=out_dir / (
                 f"Block_{block_idx:02d}_Rank_{rank_in_block}_"
-                f"Peak_{global_num:02d}_stabilogram_black_red_ellipses.png"
+                f"Peak_{global_num:02d}_stabilogram_trueCOP_velocity.png"
             ),
         )
 
+    return out_dir
 
+
+# ============================================================
+# MAIN
+# ============================================================
 def main():
-    """Run the analysis on all .mat files in the folder."""
-    mats = find_input_files()
-
+    """Run the analysis on selected file(s)."""
     print("=" * 70)
-    print("COP VELOCITY ANALYSIS - TOP 2 PEAKS PER 30 s BLOCK")
+    print("TRUE COP VELOCITY ANALYSIS (LEFT PLATE)")
     print("=" * 70)
+    print(f"Repo root:        {REPO_ROOT}")
     print(f"Input MAT folder: {RAW_MAT_DIR}")
-    print(f"Output root:      {OUT_DATA_DIR}")
-    print(f"Found {len(mats)} MAT file(s).")
-    print()
+    print(f"Output root:      {OUT_RESULTS_ROOT}")
+    print("-" * 70)
 
-    for p in mats:
+    selected_paths = choose_input_files()
+
+    print(f"Files selected:   {len(selected_paths)}")
+    print("-" * 70)
+
+    for i, mat_path in enumerate(selected_paths, start=1):
+        print(f"[{i}/{len(selected_paths)}] Processing: {mat_path.name}")
+        out_dir = run_one_file(mat_path)
+        print(f"Saved to: {out_dir}")
         print("-" * 70)
-        print(f"Processing: {p.name}")
-        run_one_file(p)
-        print(f"  Saved to: {out_dir_for(p)}")
-        print()
 
     print("=" * 70)
     print("Done.")
