@@ -14,7 +14,7 @@ from scipy.signal import butter, filtfilt, find_peaks, savgol_filter
 SCRIPT_PATH = Path(__file__).resolve()
 REPO_ROOT = SCRIPT_PATH.parents[3]
 
-RAW_MAT_DIR = REPO_ROOT / "data" / "interim" / "force_plate"
+RAW_MAT_DIR = REPO_ROOT / "data" / "raw" / "force_plate"
 OUT_RESULTS_ROOT = REPO_ROOT / "analysis" / "results"
 
 
@@ -42,8 +42,8 @@ USE_TIME_VECTOR_FOR_FS = True
 FORCE_FREQUENCY_HZ = 960.0
 
 # Optional trimming before any baseline/COP/velocity analysis
-TRIM_START_SEC = 0.0
-TRIM_END_SEC = 0.0
+TRIM_START_SEC = 25.0
+TRIM_END_SEC = 202.5
 
 # Force/moment filtering before COP calculation
 APPLY_FORCE_MOMENT_FILTER = True
@@ -68,7 +68,7 @@ VELOCITY_SMOOTH_POLYORDER = 2
 BASELINE_WINDOW_SEC = 10.0
 
 # Threshold based on baseline distribution of resultant velocity
-BASELINE_PERCENTILE = 97.5
+BASELINE_PERCENTILE = 80
 
 # Peak detection settings
 MIN_PEAK_DISTANCE_SEC = 1.00
@@ -81,7 +81,7 @@ MAX_SELECTED_PEAKS = None
 # Optional block-based selection
 USE_BLOCK_SELECTION = True
 BLOCK_SEC = 30.0
-TOP_N_PER_BLOCK = 2
+TOP_N_PER_BLOCK = 10
 
 
 # ============================================================
