@@ -127,7 +127,7 @@ USE_TIME_VECTOR_FOR_FS = True
 FORCE_FREQUENCY_HZ = 960.0
 
 # Optional trimming before any baseline/COP/velocity analysis
-TRIM_START_SEC = 15.0
+TRIM_START_SEC = 55.0
 TRIM_END_SEC = 0.0
 
 # Force/moment filtering before COP calculation
