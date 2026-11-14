@@ -42,8 +42,8 @@ USE_TIME_VECTOR_FOR_FS = True
 FORCE_FREQUENCY_HZ = 960.0
 
 # Optional trimming before any baseline/COP/velocity analysis
-TRIM_START_SEC = 25.0
-TRIM_END_SEC = 202.5
+TRIM_START_SEC = 15.0
+TRIM_END_SEC = 0.0
 
 # Force/moment filtering before COP calculation
 APPLY_FORCE_MOMENT_FILTER = True
@@ -68,12 +68,12 @@ VELOCITY_SMOOTH_POLYORDER = 2
 BASELINE_WINDOW_SEC = 10.0
 
 # Threshold based on baseline distribution of resultant velocity
-BASELINE_PERCENTILE = 80
+BASELINE_PERCENTILE = 95
 
 # Peak detection settings
-MIN_PEAK_DISTANCE_SEC = 1.00
+MIN_PEAK_DISTANCE_SEC = 2.0
 MIN_PEAK_WIDTH_SEC = 0.03
-MIN_PEAK_PROMINENCE = 0.01   # in Vr units after true COP velocity calculation
+MIN_PEAK_PROMINENCE = 0.02   # in Vr units after true COP velocity calculation
 
 # Optional cap on number of peaks kept overall (None = keep all)
 MAX_SELECTED_PEAKS = None
@@ -81,7 +81,7 @@ MAX_SELECTED_PEAKS = None
 # Optional block-based selection
 USE_BLOCK_SELECTION = True
 BLOCK_SEC = 30.0
-TOP_N_PER_BLOCK = 10
+TOP_N_PER_BLOCK = 3
 
 
 # ============================================================
@@ -353,6 +353,12 @@ def compute_true_cop_from_left_plate(
     ry = mx / safe_fz
     rx = -my / safe_fz
 
+    #Temporarily swap plate x and y
+    rx, ry = ry, rx
+
+    # Reverse the new x direction — only if confirmed
+    rx = -rx
+    
     return rx, ry, fz
 
 
@@ -964,7 +970,19 @@ def plot_peak_stabilogram_gradient(
     ax.set_xlabel("COPx (m)")
     ax.set_ylabel("COPy (m)")
     ax.grid(True, alpha=0.35)
-    ax.axis("equal")
+    # Equal physical scale, with symmetric limits around baseline
+    limit = max(
+        float(np.max(np.abs(x))),
+        float(np.max(np.abs(y))),
+        0.01,
+    ) * 1.10
+
+    ax.set_xlim(-limit, limit)
+    ax.set_ylim(-limit, limit)
+    ax.set_aspect("equal", adjustable="box")
+
+    ax.axhline(0, color="gray", linewidth=0.8)
+    ax.axvline(0, color="gray", linewidth=0.8)
 
     add_bottom_right_legend_block(ax, context_cmap, highlight_cmap)
 
@@ -1025,6 +1043,10 @@ def run_one_file(mat_path: Path) -> Path:
 
     # Neutral point for descriptive reporting
     neutral_x, neutral_y = compute_neutral_point(rx, ry, t)
+
+    # Express COP relative to the first 10 seconds of standing (can delete if we odont want to start at 0,0)
+    rx = rx - neutral_x
+    ry = ry - neutral_y
 
     # --------------------------------------------------------
     # Compute velocity from true COP
