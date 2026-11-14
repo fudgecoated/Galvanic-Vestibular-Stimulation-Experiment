@@ -42,8 +42,8 @@ USE_TIME_VECTOR_FOR_FS = True
 FORCE_FREQUENCY_HZ = 960.0
 
 # Optional trimming before any baseline/COP/velocity analysis
-TRIM_START_SEC = 15.0
-TRIM_END_SEC = 0.0
+TRIM_START_SEC = 40.0
+TRIM_END_SEC = 10.0
 
 # Force/moment filtering before COP calculation
 APPLY_FORCE_MOMENT_FILTER = True
@@ -353,12 +353,8 @@ def compute_true_cop_from_left_plate(
     ry = mx / safe_fz
     rx = -my / safe_fz
 
-    #Temporarily swap plate x and y
-    rx, ry = ry, rx
-
-    # Reverse the new x direction — only if confirmed
     rx = -rx
-    
+
     return rx, ry, fz
 
 
